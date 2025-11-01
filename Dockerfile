@@ -31,7 +31,9 @@ ENV NODE_NO_WARNINGS=1
 ENV NODE_OPTIONS="--max-old-space-size=4096 --max-semi-space-size=64"
 
 RUN npm config set prefix /home/claude/.npm && \
-  npm install -g @anthropic-ai/claude-code
+  npm install -g @anthropic-ai/claude-code && \
+  npm install -g @openai/codex@latest
+
 
 # Healthcheck to detect if claude is hanging
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
