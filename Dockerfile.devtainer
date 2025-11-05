@@ -58,14 +58,16 @@ RUN useradd -ms /bin/bash dev && \
 USER dev
 WORKDIR /home/dev
 
-# Install nvm and latest Node.js
+# Install nvm and latest Node.js (for project development)
+# Note: System Node.js (above) is for Claude CLI and persists across nvm version switches
 ENV NVM_DIR=/home/dev/.nvm
 RUN curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash && \
     . $NVM_DIR/nvm.sh && \
-    nvm install node && \
-    nvm use node && \
-    nvm alias default node && \
-    npm install -g yarn
+    nvm install 24 && \
+    nvm use 24 && \
+    nvm alias default 24 && \
+    npm install -g yarn && \
+    npm install -g @anthropic-ai/claude-code
 
 # Install gvm and latest Go
 SHELL ["/bin/bash", "-c"]
@@ -84,6 +86,7 @@ RUN echo 'export NVM_DIR="$HOME/.nvm"' >> /home/dev/.bashrc && \
     echo '[[ -s "$HOME/.gvm/scripts/gvm" ]] && source "$HOME/.gvm/scripts/gvm"' >> /home/dev/.bashrc && \
     echo 'alias fd=fdfind' >> /home/dev/.bashrc
 
+
 # Setup environment for non-interactive shells
 ENV HOME=/home/dev
 
@@ -91,6 +94,7 @@ ENV HOME=/home/dev
 RUN nvim --headless "+Lazy! sync" +qa
 
 # Verify installations
+# Note: Claude CLI verification skipped during build (needs runtime environment)
 RUN . $NVM_DIR/nvm.sh && \
     . /home/dev/.gvm/scripts/gvm && \
     node --version && \

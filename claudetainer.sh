@@ -20,6 +20,7 @@ else
     -v $HOME/.claude.json:/home/claude/.claude.json \
     -v $HOME/.claude:/home/claude/.claude \
     -v $HOME/.config/claude:/claude \
+    -v $HOME/.codex:/home/claude/.codex \
     -v $(pwd):$(pwd) \
     -w $(pwd) \
     -e CLAUDE_CONFIG_DIR=/claude \

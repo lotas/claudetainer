@@ -276,6 +276,10 @@ ensure_container_running() {
             --add-host=host.docker.internal:host-gateway \
             $port_flags \
             -v "$PROJECT_DIR:$PROJECT_DIR" \
+            -v $HOME/.claude.json:/home/dev/.claude.json \
+            -v $HOME/.claude:/home/dev/.claude \
+            -v $HOME/.config/claude:/claude \
+            -e CLAUDE_CONFIG_DIR=/claude \
             -w "$PROJECT_DIR" \
             "$IMAGE_NAME" \
             tail -f /dev/null > /dev/null
