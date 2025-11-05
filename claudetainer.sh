@@ -1,6 +1,9 @@
 #!/bin/bash
 
-CONTAINER_NAME="claudetainer"
+# create unique name for the container and hash of the current directory
+DIR_HASH=$(echo -n "$(pwd)" | md5sum | cut -d' ' -f1)
+
+CONTAINER_NAME="claudetainer-$DIR_HASH"
 
 # Check if container already exists
 if docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
