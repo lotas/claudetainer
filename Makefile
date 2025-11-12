@@ -3,7 +3,7 @@
 .PHONY: install install-claudetainer install-devtainer uninstall
 
 build:
-		docker build --platform=linux/arm64 -t claudetainer .
+		docker build --platform=linux/arm64 --no-cache -t claudetainer .
 
 build-dev:
 	docker build --platform=linux/arm64 -f Dockerfile.devtainer -t devtainer .
