@@ -97,6 +97,37 @@ devtainer exec npm install
 devtainer exec go build ./...
 ```
 
+### Multi-Session Workflows
+
+Devtainer supports running multiple terminal sessions in the same container simultaneously. Each session gets its own shell process but shares the same environment, filesystem, and running processes.
+
+**Example: Running server and tests in parallel**
+
+```bash
+# Terminal 1: Start your development server
+devtainer shell
+npm run dev
+
+# Terminal 2: Run tests (simultaneously)
+devtainer shell
+npm test -- --watch
+
+# Terminal 3: View active sessions
+devtainer ps
+```
+
+All sessions share:
+- The same container environment and filesystem
+- Access to running processes (servers, background jobs)
+- Installed packages and configurations
+
+**List active sessions:**
+```bash
+devtainer ps
+```
+
+This shows all active bash sessions and running processes in the container, making it easy to track what's running where.
+
 ### Container Management
 
 ```bash

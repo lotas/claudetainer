@@ -201,6 +201,7 @@ Usage: $(basename "$0") [COMMAND] [ARGS...]
 Commands:
     shell                 Start interactive bash shell in project container
     exec <command>        Execute command in project container
+    ps                    Show active sessions and processes in the container
     stop                  Stop the project container
     clean                 Stop and remove the project container
     rebuild               Rebuild the current image (base or project-specific)
@@ -236,9 +237,23 @@ Examples:
     $(basename "$0") init --with-dockerfile  # Initialize with Dockerfile template
     $(basename "$0") shell                   # Start shell (auto-builds if needed)
     $(basename "$0") exec make test          # Run command in container
+    $(basename "$0") ps                      # View active sessions and processes
 
     # Override settings with environment variables
     DEVTAINER_MEMORY=16g DEVTAINER_CPUS=8.0 $(basename "$0") shell
+
+Multi-Session Workflows:
+    Devtainer supports multiple concurrent shell sessions in the same container.
+    Each terminal creates an independent shell process sharing the same environment.
+
+    Example - Running server and tests simultaneously:
+        Terminal 1:  $(basename "$0") shell
+                     npm run dev          # Start development server
+
+        Terminal 2:  $(basename "$0") shell
+                     npm test -- --watch  # Run tests in watch mode
+
+        Terminal 3:  $(basename "$0") ps   # View all active sessions
 
 Accessing host services from container:
     psql -h host.docker.internal -p 5432 -U postgres
@@ -326,6 +341,27 @@ cmd_exec() {
   fi
   ensure_container_running
   docker exec -it "$CONTAINER_NAME" "$@"
+}
+
+cmd_ps() {
+    # Check if container is running
+    if ! docker ps --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
+        echo "Container $CONTAINER_NAME is not running"
+        echo "Run 'devtainer shell' to start it"
+        exit 1
+    fi
+
+    echo "=== Active Sessions in $CONTAINER_NAME ==="
+    echo ""
+
+    # Get processes with nice formatting
+    # Show PID, TTY, TIME, and CMD to identify shell sessions
+    docker exec "$CONTAINER_NAME" ps aux --forest | head -1  # Header
+    docker exec "$CONTAINER_NAME" ps aux --forest | grep -v "ps aux" | grep -v "grep"
+
+    echo ""
+    echo "Tip: Each 'bash' process represents an active shell session"
+    echo "     Run 'devtainer shell' in another terminal to create a new session"
 }
 
 cmd_stop() {
@@ -580,6 +616,9 @@ exec)
   ;;
 stop)
   cmd_stop
+  ;;
+ps)
+  cmd_ps
   ;;
 clean)
   cmd_clean

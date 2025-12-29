@@ -6,6 +6,9 @@ ENV DEBIAN_FRONTEND=noninteractive
 # Copy uv from official container (multi-arch, auto-detects platform)
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
+# Bun from official container
+COPY --from=oven/bun:1 /usr/local/bin/bun /usr/local/bin/bunx /bin/
+
 # Install base dependencies (including gvm requirements and network tools)
 RUN apt-get update && apt-get install -y \
   curl \
@@ -75,12 +78,13 @@ RUN curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | b
 SHELL ["/bin/bash", "-c"]
 RUN curl -s -S -L https://raw.githubusercontent.com/moovweb/gvm/master/binscripts/gvm-installer | bash && \
   source /home/dev/.gvm/scripts/gvm && \
-  gvm install go1.23.4 -B && \
-  gvm use go1.23.4 --default
+  gvm install go1.23.5 -B && \
+  gvm use go1.23.5 --default
 
 # Install LazyVim
 RUN git clone https://github.com/LazyVim/starter ~/.config/nvim && \
   rm -rf ~/.config/nvim/.git
+
 
 # Add nvm and gvm initialization to bashrc for interactive shells
 RUN echo 'export NVM_DIR="$HOME/.nvm"' >> /home/dev/.bashrc && \
@@ -105,6 +109,7 @@ RUN . $NVM_DIR/nvm.sh && \
   go version && \
   python3 --version && \
   uv --version && \
+  bun --version && \
   nvim --version
 
 # Default shell
