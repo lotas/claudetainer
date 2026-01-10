@@ -422,6 +422,20 @@ ensure_container_running() {
     if ! docker ps --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
       echo "Starting existing container: $CONTAINER_NAME"
       docker start "$CONTAINER_NAME" >/dev/null
+
+      # Fix ownership of volume mount points
+      local volume_paths=$(get_custom_volumes)
+      if [ -n "$volume_paths" ]; then
+        while IFS= read -r volume_path; do
+          local mount_point
+          if [[ "$volume_path" = /* ]]; then
+            mount_point="$volume_path"
+          else
+            mount_point="$PROJECT_DIR/$volume_path"
+          fi
+          docker exec -u root "$CONTAINER_NAME" chown -R dev:dev "$mount_point" 2>/dev/null || true
+        done <<<"$volume_paths"
+      fi
     fi
   else
     # Build port forwarding flags
@@ -472,6 +486,21 @@ ensure_container_running() {
       -w "$PROJECT_DIR" \
       "$IMAGE_NAME" \
       tail -f /dev/null >/dev/null
+
+    # Fix ownership of volume mount points
+    local volume_paths=$(get_custom_volumes)
+    if [ -n "$volume_paths" ]; then
+      echo "Fixing volume permissions..."
+      while IFS= read -r volume_path; do
+        local mount_point
+        if [[ "$volume_path" = /* ]]; then
+          mount_point="$volume_path"
+        else
+          mount_point="$PROJECT_DIR/$volume_path"
+        fi
+        docker exec -u root "$CONTAINER_NAME" chown -R dev:dev "$mount_point" 2>/dev/null || true
+      done <<<"$volume_paths"
+    fi
   fi
 }
 
