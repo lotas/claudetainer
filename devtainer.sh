@@ -62,6 +62,9 @@ load_project_config() {
       PORTS)
         # Will be handled by get_custom_ports
         ;;
+      VOLUMES)
+        # Will be handled by get_custom_volumes
+        ;;
       *)
         # Any other variable is treated as a custom environment variable
         CUSTOM_ENV_VARS+=("$key=$value")
@@ -175,6 +178,140 @@ build_env_flags() {
   echo "$env_flags"
 }
 
+get_custom_volumes() {
+  local custom_volumes=()
+
+  # Read from .devtainer/config VOLUMES setting
+  if [ -f "$PROJECT_DIR/.devtainer/config" ]; then
+    local volumes_value=$(grep "^VOLUMES=" "$PROJECT_DIR/.devtainer/config" | cut -d'=' -f2- | xargs)
+    # Remove quotes if present
+    volumes_value="${volumes_value%\"}"
+    volumes_value="${volumes_value#\"}"
+    volumes_value="${volumes_value%\'}"
+    volumes_value="${volumes_value#\'}"
+
+    if [ -n "$volumes_value" ]; then
+      IFS=',' read -ra config_volumes <<<"$volumes_value"
+      for volume_path in "${config_volumes[@]}"; do
+        volume_path=$(echo "$volume_path" | xargs)
+
+        # Skip empty paths
+        [ -z "$volume_path" ] && continue
+
+        # Reject paths with .. (directory traversal)
+        if [[ "$volume_path" =~ \.\. ]]; then
+          echo "Warning: Skipping volume path with '..' : $volume_path" >&2
+          continue
+        fi
+
+        # Reject paths that equal project root
+        if [ "$volume_path" = "." ] || [ "$volume_path" = "./" ]; then
+          echo "Warning: Skipping volume path that equals project root: $volume_path" >&2
+          continue
+        fi
+
+        custom_volumes+=("$volume_path")
+      done
+    fi
+  fi
+
+  # Read from DEVTAINER_VOLUMES environment variable (highest priority)
+  if [ -n "$DEVTAINER_VOLUMES" ]; then
+    IFS=',' read -ra env_volumes <<<"$DEVTAINER_VOLUMES"
+    for volume_path in "${env_volumes[@]}"; do
+      volume_path=$(echo "$volume_path" | xargs)
+
+      # Skip empty paths
+      [ -z "$volume_path" ] && continue
+
+      # Reject paths with .. (directory traversal)
+      if [[ "$volume_path" =~ \.\. ]]; then
+        echo "Warning: Skipping volume path with '..' : $volume_path" >&2
+        continue
+      fi
+
+      # Reject paths that equal project root
+      if [ "$volume_path" = "." ] || [ "$volume_path" = "./" ]; then
+        echo "Warning: Skipping volume path that equals project root: $volume_path" >&2
+        continue
+      fi
+
+      custom_volumes+=("$volume_path")
+    done
+  fi
+
+  # Return unique volumes
+  printf '%s\n' "${custom_volumes[@]}" | sort -u
+}
+
+sanitize_volume_name() {
+  local path="$1"
+  local sanitized="$path"
+
+  # Remove leading dots
+  sanitized="${sanitized#.}"
+
+  # Replace / with -
+  sanitized="${sanitized//\//-}"
+
+  # Replace special characters with -
+  sanitized=$(echo "$sanitized" | tr -c '[:alnum:]-' '-')
+
+  # Remove multiple consecutive dashes
+  sanitized=$(echo "$sanitized" | tr -s '-')
+
+  # Remove leading/trailing dashes
+  sanitized="${sanitized#-}"
+  sanitized="${sanitized%-}"
+
+  # Convert to lowercase
+  sanitized=$(echo "$sanitized" | tr '[:upper:]' '[:lower:]')
+
+  # Truncate if > 240 chars (leave room for prefix)
+  if [ ${#sanitized} -gt 240 ]; then
+    sanitized="${sanitized:0:240}"
+  fi
+
+  echo "$sanitized"
+}
+
+build_volume_flags() {
+  local volume_flags=""
+  local all_volumes=()
+
+  # Get volumes from config file or environment variable
+  while IFS= read -r volume_path; do
+    all_volumes+=("$volume_path")
+  done < <(get_custom_volumes)
+
+  # Build -v flags for each unique volume
+  for volume_path in "${all_volumes[@]}"; do
+    # Sanitize the path for volume name
+    local sanitized=$(sanitize_volume_name "$volume_path")
+
+    # Skip if sanitization resulted in empty name
+    [ -z "$sanitized" ] && continue
+
+    # Determine mount point
+    local mount_point
+    if [[ "$volume_path" = /* ]]; then
+      # Absolute path
+      mount_point="$volume_path"
+    else
+      # Relative path - relative to PROJECT_DIR
+      mount_point="$PROJECT_DIR/$volume_path"
+    fi
+
+    # Build volume name using container name prefix
+    local volume_name="${CONTAINER_NAME}-${sanitized}"
+
+    # Add volume flag
+    volume_flags="$volume_flags -v $volume_name:$mount_point"
+  done
+
+  echo "$volume_flags"
+}
+
 build_project_image() {
   if [ -z "$PROJECT_DOCKERFILE" ]; then
     return 0
@@ -203,7 +340,9 @@ Commands:
     exec <command>        Execute command in project container
     ps                    Show active sessions and processes in the container
     stop                  Stop the project container
-    clean                 Stop and remove the project container
+    clean [-v|--volumes]  Stop and remove the project container (optionally with volumes)
+    volumes               List named volumes for this project
+    volume-prune          Remove unused devtainer volumes
     rebuild               Rebuild the current image (base or project-specific)
     base-rebuild          Rebuild the base devtainer image
     init [--with-dockerfile]  Initialize .devtainer/ configuration for current project
@@ -291,6 +430,9 @@ ensure_container_running() {
     # Build custom environment variable flags
     local env_flags=$(build_env_flags)
 
+    # Build volume flags
+    local volume_flags=$(build_volume_flags)
+
     # Create new container
     echo "Creating new container: $CONTAINER_NAME"
     echo "Image: $IMAGE_NAME"
@@ -306,6 +448,11 @@ ensure_container_running() {
       echo "Custom environment variables: ${#CUSTOM_ENV_VARS[@]}"
     fi
 
+    local volumes=$(get_custom_volumes | xargs)
+    if [ -n "$volumes" ]; then
+      echo "Named volumes: $volumes"
+    fi
+
     docker run -d \
       --name "$CONTAINER_NAME" \
       --platform="$PLATFORM" \
@@ -315,6 +462,7 @@ ensure_container_running() {
       --pids-limit=$PIDS_LIMIT \
       --add-host=host.docker.internal:host-gateway \
       $port_flags \
+      $volume_flags \
       -v "$PROJECT_DIR:$PROJECT_DIR" \
       -v $HOME/.claude.json:/home/dev/.claude.json \
       -v $HOME/.claude:/home/dev/.claude \
@@ -374,11 +522,95 @@ cmd_stop() {
 }
 
 cmd_clean() {
+  local remove_volumes=false
+
+  # Parse arguments for --volumes or -v flag
+  for arg in "$@"; do
+    if [ "$arg" = "--volumes" ] || [ "$arg" = "-v" ]; then
+      remove_volumes=true
+    fi
+  done
+
+  # Remove container
   if docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
     echo "Removing container: $CONTAINER_NAME"
     docker rm -f "$CONTAINER_NAME" >/dev/null
   else
     echo "Container $CONTAINER_NAME does not exist"
+  fi
+
+  # Remove volumes if requested
+  if [ "$remove_volumes" = true ]; then
+    echo "Removing volumes for container: $CONTAINER_NAME"
+    local volumes=$(docker volume ls --filter name="${CONTAINER_NAME}-" --format "{{.Name}}" 2>/dev/null)
+    if [ -n "$volumes" ]; then
+      local volume_count=0
+      while IFS= read -r volume_name; do
+        echo "  Removing volume: $volume_name"
+        docker volume rm "$volume_name" >/dev/null 2>&1
+        ((volume_count++))
+      done <<<"$volumes"
+      echo "Removed $volume_count volume(s)"
+    else
+      echo "No volumes found for this container"
+    fi
+  fi
+}
+
+cmd_volumes_list() {
+  echo "Volumes for container: $CONTAINER_NAME"
+  local volumes=$(docker volume ls --filter name="${CONTAINER_NAME}-" --format "{{.Name}}" 2>/dev/null)
+  if [ -n "$volumes" ]; then
+    echo "$volumes" | while IFS= read -r volume_name; do
+      echo "  $volume_name"
+    done
+  else
+    echo "  No volumes found"
+  fi
+}
+
+cmd_volume_prune() {
+  echo "Searching for unused devtainer volumes..."
+  local all_volumes=$(docker volume ls --filter name="devtainer-" --format "{{.Name}}" 2>/dev/null)
+
+  if [ -z "$all_volumes" ]; then
+    echo "No devtainer volumes found"
+    return
+  fi
+
+  local orphaned_volumes=()
+  while IFS= read -r volume_name; do
+    # Extract container name prefix (everything before the last dash and sanitized path)
+    # Volume format: devtainer-<hash>-<sanitized_path>
+    # Container format: devtainer-<hash>
+    local container_prefix=$(echo "$volume_name" | grep -o '^devtainer-[a-f0-9]\+')
+
+    # Check if container exists
+    if ! docker ps -a --format '{{.Names}}' | grep -q "^${container_prefix}$"; then
+      orphaned_volumes+=("$volume_name")
+    fi
+  done <<<"$all_volumes"
+
+  if [ ${#orphaned_volumes[@]} -eq 0 ]; then
+    echo "No orphaned volumes found"
+    return
+  fi
+
+  echo "Found ${#orphaned_volumes[@]} orphaned volume(s):"
+  for vol in "${orphaned_volumes[@]}"; do
+    echo "  $vol"
+  done
+
+  echo ""
+  read -p "Remove these volumes? (y/N): " confirm
+  if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
+    for vol in "${orphaned_volumes[@]}"; do
+      echo "Removing: $vol"
+      docker volume rm "$vol" >/dev/null 2>&1
+    done
+    echo "Done"
+  else
+    echo "Cancelled"
   fi
 }
 
@@ -480,6 +712,20 @@ cmd_info() {
   else
     echo "  none"
   fi
+
+  echo ""
+  echo "=== Named Volumes ==="
+  local custom_volumes=$(get_custom_volumes | xargs)
+  if [ -n "$custom_volumes" ]; then
+    echo "Configured volumes:   $custom_volumes"
+    # Show actual docker volumes if container exists
+    if docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
+      echo "Docker volumes:"
+      docker volume ls --filter name="${CONTAINER_NAME}-" --format "  {{.Name}}" 2>/dev/null
+    fi
+  else
+    echo "Configured volumes:   none"
+  fi
 }
 
 cmd_init() {
@@ -533,6 +779,19 @@ cmd_init() {
 # Comma-separated list of ports to forward from container to host
 # No ports are forwarded by default - only forward what you need
 #PORTS=3000,5432,6379
+
+# === Named Volumes ===
+# Comma-separated list of directories to isolate in named volumes
+# Prevents binary compatibility issues when running Linux containers on macOS/Windows
+# Common examples: node_modules, .venv, target, build, __pycache__
+#VOLUMES=node_modules,.venv
+
+# Language-specific patterns:
+# Node.js:    VOLUMES=node_modules
+# Python:     VOLUMES=.venv,__pycache__
+# Rust:       VOLUMES=target
+# Go:         VOLUMES=vendor
+# Multi-lang: VOLUMES=node_modules,.venv,target
 
 # === Custom Environment Variables ===
 # Add any custom variables your project needs below.
@@ -621,7 +880,13 @@ ps)
   cmd_ps
   ;;
 clean)
-  cmd_clean
+  cmd_clean "$@"
+  ;;
+volumes)
+  cmd_volumes_list
+  ;;
+volume-prune)
+  cmd_volume_prune
   ;;
 rebuild)
   cmd_rebuild
