@@ -72,7 +72,8 @@ RUN curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | b
   nvm alias default 24 && \
   npm install -g yarn && \
   npm install -g @anthropic-ai/claude-code \
-  npm install -g @openai/codex@latest
+  npm install -g @openai/codex@latest \
+  npm install -g opencode-ai@latest 
 
 # Install gvm and latest Go
 SHELL ["/bin/bash", "-c"]

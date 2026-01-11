@@ -478,6 +478,8 @@ ensure_container_running() {
       $port_flags \
       $volume_flags \
       -v "$PROJECT_DIR:$PROJECT_DIR" \
+      -v $HOME/.codex:/home/dev/.codex \
+      -v $HOME/.config/opencode:/home/dev/.config/opencode \
       -v $HOME/.claude.json:/home/dev/.claude.json \
       -v $HOME/.claude:/home/dev/.claude \
       -v $HOME/.config/claude:/claude \
@@ -521,24 +523,24 @@ cmd_exec() {
 }
 
 cmd_ps() {
-    # Check if container is running
-    if ! docker ps --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
-        echo "Container $CONTAINER_NAME is not running"
-        echo "Run 'devtainer shell' to start it"
-        exit 1
-    fi
+  # Check if container is running
+  if ! docker ps --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
+    echo "Container $CONTAINER_NAME is not running"
+    echo "Run 'devtainer shell' to start it"
+    exit 1
+  fi
 
-    echo "=== Active Sessions in $CONTAINER_NAME ==="
-    echo ""
+  echo "=== Active Sessions in $CONTAINER_NAME ==="
+  echo ""
 
-    # Get processes with nice formatting
-    # Show PID, TTY, TIME, and CMD to identify shell sessions
-    docker exec "$CONTAINER_NAME" ps aux --forest | head -1  # Header
-    docker exec "$CONTAINER_NAME" ps aux --forest | grep -v "ps aux" | grep -v "grep"
+  # Get processes with nice formatting
+  # Show PID, TTY, TIME, and CMD to identify shell sessions
+  docker exec "$CONTAINER_NAME" ps aux --forest | head -1 # Header
+  docker exec "$CONTAINER_NAME" ps aux --forest | grep -v "ps aux" | grep -v "grep"
 
-    echo ""
-    echo "Tip: Each 'bash' process represents an active shell session"
-    echo "     Run 'devtainer shell' in another terminal to create a new session"
+  echo ""
+  echo "Tip: Each 'bash' process represents an active shell session"
+  echo "     Run 'devtainer shell' in another terminal to create a new session"
 }
 
 cmd_stop() {
