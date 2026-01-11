@@ -480,6 +480,7 @@ ensure_container_running() {
       -v "$PROJECT_DIR:$PROJECT_DIR" \
       -v $HOME/.codex:/home/dev/.codex \
       -v $HOME/.config/opencode:/home/dev/.config/opencode \
+      -v $HOME/.local/share/opencode:/home/dev/.local/share/opencode \
       -v $HOME/.claude.json:/home/dev/.claude.json \
       -v $HOME/.claude:/home/dev/.claude \
       -v $HOME/.config/claude:/claude \
