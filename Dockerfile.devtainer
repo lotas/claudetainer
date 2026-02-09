@@ -71,16 +71,19 @@ RUN curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | b
   nvm use 24 && \
   nvm alias default 24 && \
   npm install -g yarn && \
-  npm install -g @anthropic-ai/claude-code \
-  npm install -g @openai/codex@latest \
-  npm install -g opencode-ai@latest 
+  npm install -g @openai/codex@latest && \
+  npm install -g opencode-ai@latest
+
+#  npm install -g @anthropic-ai/claude-code \
+# New way to install claude code - https://code.claude.com/docs/en/setup
+RUN curl -fsSL https://claude.ai/install.sh | bash
 
 # Install gvm and latest Go
 SHELL ["/bin/bash", "-c"]
 RUN curl -s -S -L https://raw.githubusercontent.com/moovweb/gvm/master/binscripts/gvm-installer | bash && \
   source /home/dev/.gvm/scripts/gvm && \
-  gvm install go1.23.5 -B && \
-  gvm use go1.23.5 --default
+  gvm install go1.23 -B && \
+  gvm use go1.23 --default
 
 # Install LazyVim
 RUN git clone https://github.com/LazyVim/starter ~/.config/nvim && \
@@ -93,6 +96,10 @@ RUN echo 'export NVM_DIR="$HOME/.nvm"' >> /home/dev/.bashrc && \
   echo '[[ -s "$HOME/.gvm/scripts/gvm" ]] && source "$HOME/.gvm/scripts/gvm"' >> /home/dev/.bashrc && \
   echo 'alias fd=fdfind' >> /home/dev/.bashrc
 
+
+# Agent browser - https://github.com/vercel-labs/agent-browser
+RUN npm install -g agent-browser && \
+    agent-browser install --with-deps  # Download Chromium
 
 # Setup environment for non-interactive shells
 ENV HOME=/home/dev
