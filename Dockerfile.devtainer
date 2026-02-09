@@ -32,6 +32,7 @@ RUN apt-get update && apt-get install -y \
   unzip \
   htop \
   libffi-dev \
+  libnspr4 libnss3 libatk1.0-0t64 libatk-bridge2.0-0t64 libcups2t64 libxkbcommon0 libatspi2.0-0t64 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 libcairo2 libpango-1.0-0 libasound2t64 \
   && rm -rf /var/lib/apt/lists/*
 
 # Install Neovim 0.11.4 (required for LazyVim)
@@ -73,7 +74,7 @@ RUN curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | b
   npm install -g yarn && \
   npm install -g @openai/codex@latest && \
   npm install -g opencode-ai@latest && \
-  npm install -g agent-browser && agent-browser install --with-deps   # Download Chromium
+  npm install -g agent-browser && agent-browser install # Download Chromium
 
 
 # Agent browser - https://github.com/vercel-labs/agent-browser
@@ -120,6 +121,8 @@ RUN . $NVM_DIR/nvm.sh && \
   uv --version && \
   bun --version && \
   nvim --version
+
+RUN echo 'export PATH="$HOME/.local/bin:$PATH"' >> /home/dev/.bashrc
 
 # Default shell
 CMD ["/bin/bash"]
