@@ -32,8 +32,16 @@ RUN apt-get update && apt-get install -y \
   unzip \
   htop \
   libffi-dev \
-  libnspr4 libnss3 libatk1.0-0t64 libatk-bridge2.0-0t64 libcups2t64 libxkbcommon0 libatspi2.0-0t64 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 libcairo2 libpango-1.0-0 libasound2t64 \
+  chromium-browser \
   && rm -rf /var/lib/apt/lists/*
+
+# Install GitHub CLI
+RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+      | gpg --dearmor -o /usr/share/keyrings/githubcli-archive-keyring.gpg && \
+    echo "deb [arch=arm64 signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+      > /etc/apt/sources.list.d/github-cli.list && \
+    apt-get update && apt-get install -y gh && \
+    rm -rf /var/lib/apt/lists/*
 
 # Install Neovim 0.11.4 (required for LazyVim)
 RUN curl -LO https://github.com/neovim/neovim/releases/download/v0.11.4/nvim-linux-arm64.tar.gz && \
@@ -63,6 +71,15 @@ RUN useradd -ms /bin/bash dev && \
 USER dev
 WORKDIR /home/dev
 
+# Enforce read-only git: block commits and pushes
+RUN git config --global core.hooksPath /home/dev/.git-readonly-hooks && \
+    mkdir -p /home/dev/.git-readonly-hooks && \
+    printf '#!/bin/bash\necho "ERROR: Commits are disabled in devtainer (read-only mode)"\nexit 1\n' \
+      > /home/dev/.git-readonly-hooks/pre-commit && \
+    printf '#!/bin/bash\necho "ERROR: Pushes are disabled in devtainer (read-only mode)"\nexit 1\n' \
+      > /home/dev/.git-readonly-hooks/pre-push && \
+    chmod +x /home/dev/.git-readonly-hooks/pre-commit /home/dev/.git-readonly-hooks/pre-push
+
 # Install nvm and latest Node.js (for project development)
 # Note: System Node.js (above) is for Claude CLI and persists across nvm version switches
 ENV NVM_DIR=/home/dev/.nvm
@@ -74,10 +91,11 @@ RUN curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | b
   npm install -g yarn && \
   npm install -g @openai/codex@latest && \
   npm install -g opencode-ai@latest && \
-  npm install -g agent-browser && agent-browser install # Download Chromium
+  npm install -g agent-browser
 
 
 # Agent browser - https://github.com/vercel-labs/agent-browser
+# Uses system chromium-browser; run with: agent-browser --executable-path /usr/bin/chromium-browser
 
 #  npm install -g @anthropic-ai/claude-code \
 # New way to install claude code - https://code.claude.com/docs/en/setup

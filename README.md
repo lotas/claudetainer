@@ -18,6 +18,7 @@ start scanning my host for crypto wallets or password stores.
 Of course, this works as long as container and docker manage to isolate itself from the rest of the system.
 Probably slightly more secure than running it on my host machine.
 
+
 ## Features
 
 - **Single Universal Image**: One container image with all common dev tools pre-installed
@@ -36,6 +37,7 @@ Probably slightly more secure than running it on my host machine.
 - **Claude CLI**: installed natively
 - **OpenAI Codex**: via npm
 - **agent-browser**: headless Chromium for AI agents
+- **GitHub CLI**: `gh` for browsing PRs/issues (read-only git enforced via hooks)
 - **System Tools**: git, make, build-essential, curl, wget, ripgrep, fd, htop
 
 ## Building and Installing
@@ -117,6 +119,26 @@ From inside the container, access host services via `host.docker.internal`:
 psql -h host.docker.internal -p 5432 -U postgres -d mydb
 redis-cli -h host.docker.internal -p 6379
 ```
+
+## GitHub CLI Setup
+
+The `gh` CLI is pre-installed and authenticates via bind-mounted host config (`~/.config/gh`). To avoid giving the container broad GitHub access, create a **fine-grained personal access token** with minimal read-only scopes:
+
+1. Go to [github.com/settings/tokens?type=beta](https://github.com/settings/tokens?type=beta) and create a new fine-grained token
+2. Under **Repository access**, select only the repos you need
+3. Under **Permissions**, grant **read-only** access to:
+   - Contents
+   - Metadata
+   - Pull requests
+   - Issues
+4. Do **not** grant any write permissions — git commits and pushes are already blocked inside devtainer via hooks
+5. On the host, run:
+   ```bash
+   gh auth login
+   # Choose "Paste an authentication token" and enter the fine-grained PAT
+   ```
+
+This way, even if something inside the container tries to use `gh`, it can only read — not create PRs, push code, or modify issues.
 
 ## Customization
 

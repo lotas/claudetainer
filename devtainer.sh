@@ -483,6 +483,7 @@ ensure_container_running() {
       -v $HOME/.local/share/opencode:/home/dev/.local/share/opencode \
       -v $HOME/.claude.json:/home/dev/.claude.json \
       -v $HOME/.claude:/home/dev/.claude \
+      -v $HOME/.config/gh:/home/dev/.config/gh \
       -v $HOME/.config/claude:/claude \
       -e CLAUDE_CONFIG_DIR=/claude \
       $env_flags \
