@@ -1,0 +1,319 @@
+#!/bin/bash
+
+set -euo pipefail
+
+# === Configuration ===
+PR_NUMBER=""
+REPO_FLAG=""
+RUN_CLAUDE=true
+RUN_CODEX=true
+ORIGINAL_BRANCH=""
+TEMP_DIR=""
+CHECKOUT_SUCCEEDED=false
+
+# === Cleanup ===
+cleanup() {
+  # Restore original branch if we checked out a PR
+  if [ "$CHECKOUT_SUCCEEDED" = true ] && [ -n "$ORIGINAL_BRANCH" ]; then
+    git checkout "$ORIGINAL_BRANCH" --quiet 2>/dev/null || true
+  fi
+
+  # Remove temp files
+  if [ -n "$TEMP_DIR" ] && [ -d "$TEMP_DIR" ]; then
+    rm -rf "$TEMP_DIR"
+  fi
+}
+trap cleanup EXIT
+
+# === Usage ===
+usage() {
+  cat <<EOF
+Usage: pr-review <PR_NUMBER> [OPTIONS]
+
+Review a GitHub pull request using Claude Code and/or Codex in headless mode.
+
+Arguments:
+    PR_NUMBER              Pull request number (required)
+
+Options:
+    --repo OWNER/REPO      Target repository (default: current repo)
+    --claude-only          Run only Claude Code review
+    --codex-only           Run only Codex review
+    -h, --help             Show this help message
+
+Examples:
+    pr-review 42
+    pr-review 42 --repo octocat/hello-world
+    pr-review 42 --claude-only
+EOF
+}
+
+# === Argument Parsing ===
+if [ $# -eq 0 ]; then
+  usage
+  exit 1
+fi
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --repo)
+      if [ -z "${2:-}" ]; then
+        echo "Error: --repo requires OWNER/REPO argument"
+        exit 1
+      fi
+      REPO_FLAG="--repo $2"
+      shift 2
+      ;;
+    --claude-only)
+      RUN_CODEX=false
+      shift
+      ;;
+    --codex-only)
+      RUN_CLAUDE=false
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    -*)
+      echo "Error: Unknown option '$1'"
+      usage
+      exit 1
+      ;;
+    *)
+      if [ -z "$PR_NUMBER" ]; then
+        PR_NUMBER="$1"
+      else
+        echo "Error: Unexpected argument '$1'"
+        usage
+        exit 1
+      fi
+      shift
+      ;;
+  esac
+done
+
+if [ -z "$PR_NUMBER" ]; then
+  echo "Error: PR number is required"
+  usage
+  exit 1
+fi
+
+if ! [[ "$PR_NUMBER" =~ ^[0-9]+$ ]]; then
+  echo "Error: PR number must be a positive integer"
+  exit 1
+fi
+
+# === Validation ===
+echo "=== PR Review: #$PR_NUMBER ==="
+echo ""
+
+# Check gh auth
+if ! gh auth status &>/dev/null; then
+  echo "Error: GitHub CLI is not authenticated. Run 'gh auth login' first."
+  exit 1
+fi
+
+# Check requested tools are available
+if [ "$RUN_CLAUDE" = true ] && ! command -v claude &>/dev/null; then
+  echo "Warning: 'claude' not found in PATH"
+  if [ "$RUN_CODEX" = false ]; then
+    echo "Error: --claude-only specified but claude is not available"
+    exit 1
+  fi
+  echo "Falling back to Codex only"
+  RUN_CLAUDE=false
+fi
+
+if [ "$RUN_CODEX" = true ] && ! command -v codex &>/dev/null; then
+  echo "Warning: 'codex' not found in PATH"
+  if [ "$RUN_CLAUDE" = false ]; then
+    echo "Error: --codex-only specified but codex is not available"
+    exit 1
+  fi
+  echo "Falling back to Claude only"
+  RUN_CODEX=false
+fi
+
+if [ "$RUN_CLAUDE" = false ] && [ "$RUN_CODEX" = false ]; then
+  echo "Error: Neither claude nor codex is available"
+  exit 1
+fi
+
+# Verify PR exists
+# shellcheck disable=SC2086
+if ! gh pr view "$PR_NUMBER" $REPO_FLAG --json number &>/dev/null; then
+  echo "Error: PR #$PR_NUMBER not found"
+  exit 1
+fi
+
+# === Setup ===
+TEMP_DIR=$(mktemp -d)
+
+# === Gather PR Context ===
+echo "Fetching PR metadata..."
+# shellcheck disable=SC2086
+PR_META=$(gh pr view "$PR_NUMBER" $REPO_FLAG --json title,body,author,baseRefName,headRefName,files,additions,deletions)
+
+PR_TITLE=$(echo "$PR_META" | jq -r '.title')
+PR_AUTHOR=$(echo "$PR_META" | jq -r '.author.login')
+PR_BASE=$(echo "$PR_META" | jq -r '.baseRefName')
+PR_HEAD=$(echo "$PR_META" | jq -r '.headRefName')
+PR_ADDITIONS=$(echo "$PR_META" | jq -r '.additions')
+PR_DELETIONS=$(echo "$PR_META" | jq -r '.deletions')
+PR_BODY=$(echo "$PR_META" | jq -r '.body // "No description provided"')
+PR_FILES=$(echo "$PR_META" | jq -r '.files[].path' 2>/dev/null || echo "Could not list files")
+
+echo "  Title:    $PR_TITLE"
+echo "  Author:   $PR_AUTHOR"
+echo "  Branch:   $PR_HEAD → $PR_BASE"
+echo "  Changes:  +$PR_ADDITIONS / -$PR_DELETIONS"
+echo ""
+
+echo "Fetching PR diff..."
+# shellcheck disable=SC2086
+PR_DIFF=$(gh pr diff "$PR_NUMBER" $REPO_FLAG 2>/dev/null || echo "Could not fetch diff")
+
+# === Checkout PR Branch ===
+echo "Checking out PR branch..."
+ORIGINAL_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
+
+# shellcheck disable=SC2086
+if gh pr checkout "$PR_NUMBER" $REPO_FLAG --force 2>/dev/null; then
+  CHECKOUT_SUCCEEDED=true
+  echo "  Checked out branch: $PR_HEAD"
+else
+  echo "  Warning: Could not checkout PR branch, proceeding with diff-only review"
+fi
+echo ""
+
+# === Build Review Prompt ===
+REVIEW_PROMPT="You are reviewing a GitHub Pull Request. Analyze the changes carefully and provide a thorough code review.
+
+## PR Information
+- **Title:** $PR_TITLE
+- **Author:** $PR_AUTHOR
+- **Branch:** $PR_HEAD → $PR_BASE
+- **Additions:** $PR_ADDITIONS lines
+- **Deletions:** $PR_DELETIONS lines
+
+## PR Description
+$PR_BODY
+
+## Changed Files
+$PR_FILES
+
+## Diff
+\`\`\`diff
+$PR_DIFF
+\`\`\`
+
+## Review Instructions
+
+Please provide a structured review covering:
+
+1. **Summary** — Brief description of what this PR does (2-3 sentences)
+2. **Bugs & Correctness** — Logic errors, edge cases, off-by-one errors, race conditions
+3. **Security** — Injection vulnerabilities, auth issues, data exposure, OWASP concerns
+4. **Performance** — Unnecessary allocations, N+1 queries, missing indexes, algorithmic complexity
+5. **Code Quality** — Readability, naming, duplication, adherence to project conventions
+6. **Suggestions** — Specific, actionable improvements with line references where possible
+
+Be direct and specific. Reference file names and line numbers. Skip sections that have no findings."
+
+# Save prompt to temp file (avoids argument length limits)
+echo "$REVIEW_PROMPT" > "$TEMP_DIR/prompt.txt"
+
+# === Run Reviews ===
+CLAUDE_EXIT=0
+CODEX_EXIT=0
+
+if [ "$RUN_CLAUDE" = true ] && [ "$RUN_CODEX" = true ]; then
+  echo "Running Claude Code and Codex reviews in parallel..."
+  echo ""
+
+  # Run both in parallel
+  claude -p "$(cat "$TEMP_DIR/prompt.txt")" > "$TEMP_DIR/claude_review.txt" 2>&1 &
+  CLAUDE_PID=$!
+
+  codex exec "$(cat "$TEMP_DIR/prompt.txt")" > "$TEMP_DIR/codex_review.txt" 2>&1 &
+  CODEX_PID=$!
+
+  # Wait for both
+  wait $CLAUDE_PID || CLAUDE_EXIT=$?
+  wait $CODEX_PID || CODEX_EXIT=$?
+
+elif [ "$RUN_CLAUDE" = true ]; then
+  echo "Running Claude Code review..."
+  echo ""
+  claude -p "$(cat "$TEMP_DIR/prompt.txt")" > "$TEMP_DIR/claude_review.txt" 2>&1 || CLAUDE_EXIT=$?
+
+elif [ "$RUN_CODEX" = true ]; then
+  echo "Running Codex review..."
+  echo ""
+  codex exec "$(cat "$TEMP_DIR/prompt.txt")" > "$TEMP_DIR/codex_review.txt" 2>&1 || CODEX_EXIT=$?
+fi
+
+# === Write Review File ===
+REVIEW_FILE="review_${PR_NUMBER}.md"
+
+{
+  echo "# PR #$PR_NUMBER Review: $PR_TITLE"
+  echo ""
+  echo "- **Author:** $PR_AUTHOR"
+  echo "- **Branch:** $PR_HEAD → $PR_BASE"
+  echo "- **Changes:** +$PR_ADDITIONS / -$PR_DELETIONS"
+  echo "- **Reviewed:** $(date '+%Y-%m-%d %H:%M')"
+  echo ""
+
+  if [ "$RUN_CLAUDE" = true ]; then
+    echo "---"
+    echo ""
+    echo "## Claude Code Review"
+    echo ""
+    if [ $CLAUDE_EXIT -eq 0 ]; then
+      cat "$TEMP_DIR/claude_review.txt"
+    else
+      echo "> **Failed** (exit code: $CLAUDE_EXIT)"
+      echo ""
+      cat "$TEMP_DIR/claude_review.txt" 2>/dev/null || echo "(no output)"
+    fi
+    echo ""
+  fi
+
+  if [ "$RUN_CODEX" = true ]; then
+    echo "---"
+    echo ""
+    echo "## Codex Review"
+    echo ""
+    if [ $CODEX_EXIT -eq 0 ]; then
+      cat "$TEMP_DIR/codex_review.txt"
+    else
+      echo "> **Failed** (exit code: $CODEX_EXIT)"
+      echo ""
+      cat "$TEMP_DIR/codex_review.txt" 2>/dev/null || echo "(no output)"
+    fi
+    echo ""
+  fi
+} > "$REVIEW_FILE"
+
+# === Present Results ===
+echo ""
+cat "$REVIEW_FILE"
+echo ""
+echo "════════════════════════════════════════════════════════════════"
+echo "  Review saved to: $(pwd)/$REVIEW_FILE"
+echo "════════════════════════════════════════════════════════════════"
+
+# Exit with error only if both tools failed
+if [ "$RUN_CLAUDE" = true ] && [ "$RUN_CODEX" = true ]; then
+  if [ $CLAUDE_EXIT -ne 0 ] && [ $CODEX_EXIT -ne 0 ]; then
+    echo "Error: Both review tools failed"
+    exit 1
+  fi
+elif [ "$RUN_CLAUDE" = true ] && [ $CLAUDE_EXIT -ne 0 ]; then
+  exit $CLAUDE_EXIT
+elif [ "$RUN_CODEX" = true ] && [ $CODEX_EXIT -ne 0 ]; then
+  exit $CODEX_EXIT
+fi

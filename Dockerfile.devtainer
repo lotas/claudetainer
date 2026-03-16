@@ -29,6 +29,7 @@ RUN apt-get update && apt-get install -y \
   netcat-openbsd \
   ripgrep \
   fd-find \
+  jq \
   unzip \
   htop \
   libffi-dev \
@@ -140,7 +141,52 @@ RUN . $NVM_DIR/nvm.sh && \
   bun --version && \
   nvim --version
 
-RUN echo 'export PATH="$HOME/.local/bin:$PATH"' >> /home/dev/.bashrc
+RUN echo 'export PATH="$HOME/.local/bin:$HOME/.devtainer-tools:$PATH"' >> /home/dev/.bashrc
+
+# Static environment context for LLMs (Claude Code, Codex, etc.)
+# Dynamic project-specific info is appended at container creation time by devtainer.sh
+USER root
+RUN touch /CLAUDE.md /AGENTS.md && chown dev:dev /CLAUDE.md /AGENTS.md
+RUN mkdir -p /etc/devtainer && cat > /etc/devtainer/environment.md << 'ENVEOF'
+# Devtainer Environment
+
+You are running inside a devtainer — an isolated Docker development container on ARM64 Linux (Ubuntu 24.04). This file describes your environment to avoid incorrect assumptions.
+
+## Networking
+
+**IMPORTANT:** Host services (databases, APIs, etc.) are NOT available at `localhost`. Use `host.docker.internal` instead.
+
+Examples:
+- PostgreSQL: `psql -h host.docker.internal -p 5432`
+- Redis: `redis-cli -h host.docker.internal -p 6379`
+- Any host service: replace `localhost` with `host.docker.internal`
+
+## Available Tools
+
+Languages & runtimes: node (via nvm), python3.14, go (via gvm), bun, uv
+Package managers: npm, yarn, pip, poetry, pipenv, uv
+Editors: nvim (with LazyVim)
+Search: ripgrep (rg), fd-find (fdfind, aliased to fd)
+AI tools: claude (Claude Code CLI), codex, opencode
+Devtainer tools: pr-review
+Browser automation: agent-browser (use with --executable-path /usr/bin/chromium-browser)
+Git & GitHub: git, gh (GitHub CLI — read-only token, cannot create PRs or push)
+Other: curl, wget, htop, netcat, traceroute, iproute2
+
+## NOT Available
+
+- **docker** — no Docker-in-Docker. Do not try to run docker commands.
+- **systemd** — no init system. Services don't run as daemons.
+- **apt-get** (as non-root) — you're running as `dev` user. Most tools are pre-installed.
+
+## Constraints
+
+- **Git is read-only.** Commits and pushes are blocked by hooks. Do not attempt `git commit` or `git push`. You can read git history, diff, log, blame, etc.
+- **GitHub CLI is read-only.** The gh token has read-only permissions. You can fetch PRs, issues, and code but cannot create or modify them.
+- **Project directory is bind-mounted** from the host. File changes persist across container restarts.
+- **Container filesystem is ephemeral.** Anything outside the project directory or named volumes is lost when the container is recreated.
+ENVEOF
+USER dev
 
 # Default shell
 CMD ["/bin/bash"]

@@ -478,6 +478,8 @@ ensure_container_running() {
       $port_flags \
       $volume_flags \
       -v "$PROJECT_DIR:$PROJECT_DIR" \
+      -v "$SCRIPT_DIR/tools:/home/dev/.devtainer-tools:ro" \
+      -v $HOME/.gitignore:/home/dev/.gitignore \
       -v $HOME/.codex:/home/dev/.codex \
       -v $HOME/.config/opencode:/home/dev/.config/opencode \
       -v $HOME/.local/share/opencode:/home/dev/.local/share/opencode \
@@ -506,6 +508,55 @@ ensure_container_running() {
       done <<<"$volume_paths"
     fi
   fi
+
+  # Inject LLM environment context into container
+  inject_agent_context
+}
+
+inject_agent_context() {
+  # Read static template from image
+  local static_context
+  static_context=$(docker exec "$CONTAINER_NAME" cat /etc/devtainer/environment.md 2>/dev/null) || return 0
+
+  # Build dynamic section
+  local dynamic=""
+
+  local ports
+  ports=$(get_custom_ports | xargs)
+  if [ -n "$ports" ]; then
+    dynamic+=$'\n## Forwarded Ports\n'
+    dynamic+="The following ports are forwarded from the container to the host: $ports"$'\n'
+  fi
+
+  local volumes
+  volumes=$(get_custom_volumes | xargs)
+  if [ -n "$volumes" ]; then
+    dynamic+=$'\n## Named Volumes\n'
+    dynamic+="These directories use named Docker volumes (not bind-mounted from host): $volumes"$'\n'
+  fi
+
+  if [ ${#CUSTOM_ENV_VARS[@]} -gt 0 ]; then
+    dynamic+=$'\n## Custom Environment Variables\n'
+    for var in "${CUSTOM_ENV_VARS[@]}"; do
+      local key="${var%%=*}"
+      dynamic+="- \`$key\` is set"$'\n'
+    done
+  fi
+
+  # Combine and inject
+  local full_context="$static_context"
+  if [ -n "$dynamic" ]; then
+    full_context+=$'\n# Project-Specific Configuration\n'
+    full_context+="$dynamic"
+  fi
+
+  docker exec "$CONTAINER_NAME" bash -c "cat > /CLAUDE.md << 'DEVTAINER_EOF'
+$full_context
+DEVTAINER_EOF"
+
+  docker exec "$CONTAINER_NAME" bash -c "cat > /AGENTS.md << 'DEVTAINER_EOF'
+$full_context
+DEVTAINER_EOF"
 }
 
 cmd_shell() {
