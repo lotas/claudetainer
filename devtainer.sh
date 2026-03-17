@@ -181,6 +181,12 @@ build_env_flags() {
 get_custom_volumes() {
   local custom_volumes=()
 
+  # Auto-detect common dependency directories
+  while IFS= read -r vol; do
+    [ -z "$vol" ] && continue
+    custom_volumes+=("$vol")
+  done < <(detect_auto_volumes)
+
   # Read from .devtainer/config VOLUMES setting
   if [ -f "$PROJECT_DIR/.devtainer/config" ]; then
     local volumes_value=$(grep "^VOLUMES=" "$PROJECT_DIR/.devtainer/config" | cut -d'=' -f2- | xargs)
@@ -273,6 +279,16 @@ sanitize_volume_name() {
   fi
 
   echo "$sanitized"
+}
+
+detect_auto_volumes() {
+  local patterns=("-name" "node_modules" "-o" "-name" ".venv")
+
+  # Find matching directories, output paths relative to PROJECT_DIR
+  find "$PROJECT_DIR" -maxdepth 3 -type d \( "${patterns[@]}" \) -not -path '*/.*/*' 2>/dev/null | while IFS= read -r dir; do
+    local relative="${dir#$PROJECT_DIR/}"
+    echo "$relative"
+  done
 }
 
 build_volume_flags() {
@@ -810,6 +826,11 @@ cmd_info() {
   else
     echo "Configured volumes:   none"
   fi
+
+  local auto_volumes=$(detect_auto_volumes | xargs)
+  if [ -n "$auto_volumes" ]; then
+    echo "Auto-detected:        $auto_volumes"
+  fi
 }
 
 cmd_init() {
@@ -837,8 +858,20 @@ cmd_init() {
   # Create .devtainer directory
   mkdir -p "$PROJECT_DIR/.devtainer"
 
+  # Detect volumes for config template
+  local detected_volumes=""
+  detected_volumes=$(detect_auto_volumes | paste -sd ',' -)
+
+  # Build the VOLUMES line based on detection
+  local volumes_line
+  if [ -n "$detected_volumes" ]; then
+    volumes_line="VOLUMES=$detected_volumes"
+  else
+    volumes_line="#VOLUMES=node_modules,.venv"
+  fi
+
   # Create config file with template
-  cat >"$PROJECT_DIR/.devtainer/config" <<'EOF'
+  cat >"$PROJECT_DIR/.devtainer/config" <<EOF
 # Devtainer Configuration
 # All settings are optional. Uncomment and modify as needed.
 
@@ -868,7 +901,7 @@ cmd_init() {
 # Comma-separated list of directories to isolate in named volumes
 # Prevents binary compatibility issues when running Linux containers on macOS/Windows
 # Common examples: node_modules, .venv, target, build, __pycache__
-#VOLUMES=node_modules,.venv
+$volumes_line
 
 # Language-specific patterns:
 # Node.js:    VOLUMES=node_modules
