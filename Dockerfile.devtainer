@@ -73,7 +73,10 @@ USER dev
 WORKDIR /home/dev
 
 # Enforce read-only git: block commits and pushes
-RUN git config --global core.hooksPath /home/dev/.git-readonly-hooks && \
+# Use gh as git credential helper so gh pr checkout works without SSH keys
+RUN git config --global credential.helper '!gh auth git-credential' && \
+    git config --global core.excludesFile '/home/dev/.gitignore' && \
+    git config --global core.hooksPath /home/dev/.git-readonly-hooks && \
     mkdir -p /home/dev/.git-readonly-hooks && \
     printf '#!/bin/bash\necho "ERROR: Commits are disabled in devtainer (read-only mode)"\nexit 1\n' \
       > /home/dev/.git-readonly-hooks/pre-commit && \

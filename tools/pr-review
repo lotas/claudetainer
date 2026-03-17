@@ -2,6 +2,8 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
 # === Configuration ===
 PR_NUMBER=""
 REPO_FLAG=""
@@ -10,30 +12,67 @@ RUN_CODEX=true
 ORIGINAL_BRANCH=""
 TEMP_DIR=""
 CHECKOUT_SUCCEEDED=false
+SPINNER_PID=""
+
+# === Spinner ===
+spin() {
+  local label="$1"
+  local start=$SECONDS
+  local chars='|/-\'
+  local i=0
+  while true; do
+    local elapsed=$(( SECONDS - start ))
+    printf "\r  %s %s (%ds)" "${chars:i%${#chars}:1}" "$label" "$elapsed" >&2
+    i=$(( i + 1 ))
+    sleep 1
+  done
+}
+
+start_spinner() {
+  spin "$1" &
+  SPINNER_PID=$!
+}
+
+stop_spinner() {
+  if [ -n "$SPINNER_PID" ] && kill -0 "$SPINNER_PID" 2>/dev/null; then
+    kill "$SPINNER_PID" 2>/dev/null
+    wait "$SPINNER_PID" 2>/dev/null || true
+    printf "\r\033[K" >&2
+    SPINNER_PID=""
+  fi
+}
 
 # === Cleanup ===
 cleanup() {
+  stop_spinner
+
   # Restore original branch if we checked out a PR
   if [ "$CHECKOUT_SUCCEEDED" = true ] && [ -n "$ORIGINAL_BRANCH" ]; then
     git checkout "$ORIGINAL_BRANCH" --quiet 2>/dev/null || true
   fi
 
-  # Remove temp files
+  # Remove temp files on success, preserve on failure
   if [ -n "$TEMP_DIR" ] && [ -d "$TEMP_DIR" ]; then
-    rm -rf "$TEMP_DIR"
+    if [ "${SCRIPT_EXIT_CODE:-1}" -eq 0 ]; then
+      rm -rf "$TEMP_DIR"
+    else
+      echo "  Debug files preserved in: $TEMP_DIR" >&2
+    fi
   fi
 }
-trap cleanup EXIT
+SCRIPT_EXIT_CODE=1
+trap 'SCRIPT_EXIT_CODE=$?; cleanup' EXIT
 
 # === Usage ===
 usage() {
   cat <<EOF
-Usage: pr-review <PR_NUMBER> [OPTIONS]
+Usage: pr-review [PR_NUMBER] [OPTIONS]
 
-Review a GitHub pull request using Claude Code and/or Codex in headless mode.
+Review code using Claude Code and/or Codex in headless mode.
+Without a PR number, reviews the current working copy.
 
 Arguments:
-    PR_NUMBER              Pull request number (required)
+    PR_NUMBER              Pull request number (optional)
 
 Options:
     --repo OWNER/REPO      Target repository (default: current repo)
@@ -42,18 +81,14 @@ Options:
     -h, --help             Show this help message
 
 Examples:
-    pr-review 42
+    pr-review              Review current working copy
+    pr-review 42           Review PR #42
     pr-review 42 --repo octocat/hello-world
-    pr-review 42 --claude-only
+    pr-review --claude-only
 EOF
 }
 
 # === Argument Parsing ===
-if [ $# -eq 0 ]; then
-  usage
-  exit 1
-fi
-
 while [ $# -gt 0 ]; do
   case "$1" in
     --repo)
@@ -94,27 +129,12 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-if [ -z "$PR_NUMBER" ]; then
-  echo "Error: PR number is required"
-  usage
-  exit 1
-fi
-
-if ! [[ "$PR_NUMBER" =~ ^[0-9]+$ ]]; then
+if [ -n "$PR_NUMBER" ] && ! [[ "$PR_NUMBER" =~ ^[0-9]+$ ]]; then
   echo "Error: PR number must be a positive integer"
   exit 1
 fi
 
 # === Validation ===
-echo "=== PR Review: #$PR_NUMBER ==="
-echo ""
-
-# Check gh auth
-if ! gh auth status &>/dev/null; then
-  echo "Error: GitHub CLI is not authenticated. Run 'gh auth login' first."
-  exit 1
-fi
-
 # Check requested tools are available
 if [ "$RUN_CLAUDE" = true ] && ! command -v claude &>/dev/null; then
   echo "Warning: 'claude' not found in PATH"
@@ -141,159 +161,283 @@ if [ "$RUN_CLAUDE" = false ] && [ "$RUN_CODEX" = false ]; then
   exit 1
 fi
 
-# Verify PR exists
-# shellcheck disable=SC2086
-if ! gh pr view "$PR_NUMBER" $REPO_FLAG --json number &>/dev/null; then
-  echo "Error: PR #$PR_NUMBER not found"
-  exit 1
-fi
-
 # === Setup ===
 TEMP_DIR=$(mktemp -d)
+REVIEW_SYSTEM_PROMPT=$(cat "$SCRIPT_DIR/pr-review-prompt.txt")
+CONSOLIDATE_SYSTEM_PROMPT=$(cat "$SCRIPT_DIR/pr-review-consolidate.txt")
 
-# === Gather PR Context ===
-echo "Fetching PR metadata..."
-# shellcheck disable=SC2086
-PR_META=$(gh pr view "$PR_NUMBER" $REPO_FLAG --json title,body,author,baseRefName,headRefName,files,additions,deletions)
+# === Mode: PR or working copy ===
+if [ -n "$PR_NUMBER" ]; then
+  # --- PR mode ---
+  if ! gh auth status &>/dev/null; then
+    echo "Error: GitHub CLI is not authenticated. Run 'gh auth login' first."
+    exit 1
+  fi
 
-PR_TITLE=$(echo "$PR_META" | jq -r '.title')
-PR_AUTHOR=$(echo "$PR_META" | jq -r '.author.login')
-PR_BASE=$(echo "$PR_META" | jq -r '.baseRefName')
-PR_HEAD=$(echo "$PR_META" | jq -r '.headRefName')
-PR_ADDITIONS=$(echo "$PR_META" | jq -r '.additions')
-PR_DELETIONS=$(echo "$PR_META" | jq -r '.deletions')
-PR_BODY=$(echo "$PR_META" | jq -r '.body // "No description provided"')
-PR_FILES=$(echo "$PR_META" | jq -r '.files[].path' 2>/dev/null || echo "Could not list files")
+  # shellcheck disable=SC2086
+  if ! gh pr view "$PR_NUMBER" $REPO_FLAG --json number &>/dev/null; then
+    echo "Error: PR #$PR_NUMBER not found"
+    exit 1
+  fi
 
-echo "  Title:    $PR_TITLE"
-echo "  Author:   $PR_AUTHOR"
-echo "  Branch:   $PR_HEAD → $PR_BASE"
-echo "  Changes:  +$PR_ADDITIONS / -$PR_DELETIONS"
-echo ""
+  echo "Fetching PR metadata..."
+  # shellcheck disable=SC2086
+  PR_META=$(gh pr view "$PR_NUMBER" $REPO_FLAG --json title,body,author,baseRefName,headRefName,additions,deletions)
 
-echo "Fetching PR diff..."
-# shellcheck disable=SC2086
-PR_DIFF=$(gh pr diff "$PR_NUMBER" $REPO_FLAG 2>/dev/null || echo "Could not fetch diff")
+  PR_TITLE=$(echo "$PR_META" | jq -r '.title')
+  PR_AUTHOR=$(echo "$PR_META" | jq -r '.author.login')
+  PR_BASE=$(echo "$PR_META" | jq -r '.baseRefName')
+  PR_HEAD=$(echo "$PR_META" | jq -r '.headRefName')
+  PR_ADDITIONS=$(echo "$PR_META" | jq -r '.additions')
+  PR_DELETIONS=$(echo "$PR_META" | jq -r '.deletions')
+  PR_BODY=$(echo "$PR_META" | jq -r '.body // "No description provided"')
 
-# === Checkout PR Branch ===
-echo "Checking out PR branch..."
-ORIGINAL_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
+  echo "=== PR Review: #$PR_NUMBER ==="
+  echo "  Title:    $PR_TITLE"
+  echo "  Author:   $PR_AUTHOR"
+  echo "  Branch:   $PR_HEAD → $PR_BASE"
+  echo "  Changes:  +$PR_ADDITIONS / -$PR_DELETIONS"
+  echo ""
 
-# shellcheck disable=SC2086
-if gh pr checkout "$PR_NUMBER" $REPO_FLAG --force 2>/dev/null; then
+  echo "Checking out PR branch..."
+  ORIGINAL_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
+
+  # Configure git to use HTTPS instead of SSH for GitHub (avoids SSH key requirement in containers)
+  git config --global url."https://github.com/".insteadOf "git@github.com:" 2>/dev/null || true
+  gh auth setup-git 2>/dev/null || true
+
+  # shellcheck disable=SC2086
+  if ! gh pr checkout "$PR_NUMBER" $REPO_FLAG --force 2>&1; then
+    echo "Error: Could not checkout PR branch. Aborting."
+    exit 1
+  fi
   CHECKOUT_SUCCEEDED=true
   echo "  Checked out branch: $PR_HEAD"
-else
-  echo "  Warning: Could not checkout PR branch, proceeding with diff-only review"
-fi
-echo ""
+  echo ""
 
-# === Build Review Prompt ===
-REVIEW_PROMPT="You are reviewing a GitHub Pull Request. Analyze the changes carefully and provide a thorough code review.
+  REVIEW_CONTEXT="Review PR #$PR_NUMBER: $PR_TITLE by $PR_AUTHOR ($PR_HEAD → $PR_BASE, +$PR_ADDITIONS/-$PR_DELETIONS).
+Description: $PR_BODY
 
-## PR Information
-- **Title:** $PR_TITLE
-- **Author:** $PR_AUTHOR
+Use 'git diff $PR_BASE...HEAD' to see the changes. Use Read, Glob, Grep to explore the code."
+  REVIEW_LABEL="PR #$PR_NUMBER"
+  REVIEW_FILE="review_${PR_NUMBER}.md"
+  HEADER_META="- **Author:** $PR_AUTHOR
 - **Branch:** $PR_HEAD → $PR_BASE
-- **Additions:** $PR_ADDITIONS lines
-- **Deletions:** $PR_DELETIONS lines
+- **Changes:** +$PR_ADDITIONS / -$PR_DELETIONS"
 
-## PR Description
-$PR_BODY
+else
+  # --- Working copy mode ---
+  echo "=== Code Review: working copy ==="
+  echo ""
 
-## Changed Files
-$PR_FILES
+  REVIEW_CONTEXT="Review the current working copy. Use 'git diff' and 'git diff --cached' to see uncommitted changes. Use Read, Glob, Grep to explore the code."
+  REVIEW_LABEL="working copy"
+  REVIEW_FILE="review_$(date '+%Y%m%d_%H%M%S').md"
+  HEADER_META="- **Directory:** $(pwd)"
+fi
 
-## Diff
-\`\`\`diff
-$PR_DIFF
-\`\`\`
+# === Build Prompts ===
+CLAUDE_PROMPT="$REVIEW_CONTEXT
 
-## Review Instructions
+$REVIEW_SYSTEM_PROMPT"
 
-Please provide a structured review covering:
+CODEX_PROMPT="$REVIEW_CONTEXT
 
-1. **Summary** — Brief description of what this PR does (2-3 sentences)
-2. **Bugs & Correctness** — Logic errors, edge cases, off-by-one errors, race conditions
-3. **Security** — Injection vulnerabilities, auth issues, data exposure, OWASP concerns
-4. **Performance** — Unnecessary allocations, N+1 queries, missing indexes, algorithmic complexity
-5. **Code Quality** — Readability, naming, duplication, adherence to project conventions
-6. **Suggestions** — Specific, actionable improvements with line references where possible
-
-Be direct and specific. Reference file names and line numbers. Skip sections that have no findings."
-
-# Save prompt to temp file (avoids argument length limits)
-echo "$REVIEW_PROMPT" > "$TEMP_DIR/prompt.txt"
+$REVIEW_SYSTEM_PROMPT"
 
 # === Run Reviews ===
 CLAUDE_EXIT=0
 CODEX_EXIT=0
 
-if [ "$RUN_CLAUDE" = true ] && [ "$RUN_CODEX" = true ]; then
-  echo "Running Claude Code and Codex reviews in parallel..."
-  echo ""
+run_claude() {
+  claude -p "$CLAUDE_PROMPT" \
+    --max-turns 99 \
+    > "$TEMP_DIR/claude_review.txt" 2>"$TEMP_DIR/claude_stderr.txt"
+}
 
-  # Run both in parallel
-  claude -p "$(cat "$TEMP_DIR/prompt.txt")" > "$TEMP_DIR/claude_review.txt" 2>&1 &
+run_codex() {
+  codex exec --full-auto "$CODEX_PROMPT" \
+    > "$TEMP_DIR/codex_review.txt" 2>"$TEMP_DIR/codex_stderr.txt"
+}
+
+# Run a reviewer function with one retry on failure
+run_with_retry() {
+  local func="$1" label="$2" output="$3"
+  local stderr_file="${output%.txt}_stderr.txt"
+  local exit_code=0
+  $func 2>/dev/null || exit_code=$?
+  if [ $exit_code -ne 0 ] && [ $exit_code -ne 130 ]; then
+    echo "  ⟳ $label failed (exit $exit_code), retrying..." >&2
+    [ -s "$stderr_file" ] && echo "  Stderr: $(head -3 "$stderr_file")" >&2
+    exit_code=0
+    $func 2>/dev/null || exit_code=$?
+  fi
+  return $exit_code
+}
+
+if [ "$RUN_CLAUDE" = true ] && [ "$RUN_CODEX" = true ]; then
+  echo "Running Claude and Codex reviews in parallel..."
+  REVIEW_START=$SECONDS
+
+  (run_with_retry run_claude "Claude" "$TEMP_DIR/claude_review.txt") &
   CLAUDE_PID=$!
 
-  codex exec "$(cat "$TEMP_DIR/prompt.txt")" > "$TEMP_DIR/codex_review.txt" 2>&1 &
+  (run_with_retry run_codex "Codex" "$TEMP_DIR/codex_review.txt") &
   CODEX_PID=$!
 
-  # Wait for both
-  wait $CLAUDE_PID || CLAUDE_EXIT=$?
-  wait $CODEX_PID || CODEX_EXIT=$?
+  start_spinner "Waiting for reviews"
+
+  wait $CLAUDE_PID 2>/dev/null || CLAUDE_EXIT=$?
+  CLAUDE_ELAPSED=$(( SECONDS - REVIEW_START ))
+
+  wait $CODEX_PID 2>/dev/null || CODEX_EXIT=$?
+  CODEX_ELAPSED=$(( SECONDS - REVIEW_START ))
+
+  stop_spinner
+
+  if [ $CLAUDE_EXIT -eq 0 ]; then
+    echo "  ✓ Claude: done (${CLAUDE_ELAPSED}s)"
+  else
+    echo "  ✗ Claude: failed (${CLAUDE_ELAPSED}s, exit $CLAUDE_EXIT)"
+    [ -s "$TEMP_DIR/claude_stderr.txt" ] && echo "  $(head -3 "$TEMP_DIR/claude_stderr.txt")"
+  fi
+  if [ $CODEX_EXIT -eq 0 ]; then
+    echo "  ✓ Codex: done (${CODEX_ELAPSED}s)"
+  else
+    echo "  ✗ Codex: failed (${CODEX_ELAPSED}s, exit $CODEX_EXIT)"
+    [ -s "$TEMP_DIR/codex_stderr.txt" ] && echo "  $(head -3 "$TEMP_DIR/codex_stderr.txt")"
+  fi
 
 elif [ "$RUN_CLAUDE" = true ]; then
-  echo "Running Claude Code review..."
-  echo ""
-  claude -p "$(cat "$TEMP_DIR/prompt.txt")" > "$TEMP_DIR/claude_review.txt" 2>&1 || CLAUDE_EXIT=$?
+  echo "Running Claude review..."
+  REVIEW_START=$SECONDS
+  start_spinner "Claude reviewing"
+  run_with_retry run_claude "Claude" "$TEMP_DIR/claude_review.txt" || CLAUDE_EXIT=$?
+  stop_spinner
+  CLAUDE_ELAPSED=$(( SECONDS - REVIEW_START ))
+  if [ $CLAUDE_EXIT -eq 0 ]; then
+    echo "  ✓ Claude: done (${CLAUDE_ELAPSED}s)"
+  else
+    echo "  ✗ Claude: failed (${CLAUDE_ELAPSED}s, exit $CLAUDE_EXIT)"
+    [ -s "$TEMP_DIR/claude_stderr.txt" ] && echo "  $(head -3 "$TEMP_DIR/claude_stderr.txt")"
+  fi
 
 elif [ "$RUN_CODEX" = true ]; then
   echo "Running Codex review..."
-  echo ""
-  codex exec "$(cat "$TEMP_DIR/prompt.txt")" > "$TEMP_DIR/codex_review.txt" 2>&1 || CODEX_EXIT=$?
+  REVIEW_START=$SECONDS
+  start_spinner "Codex reviewing"
+  run_with_retry run_codex "Codex" "$TEMP_DIR/codex_review.txt" || CODEX_EXIT=$?
+  stop_spinner
+  CODEX_ELAPSED=$(( SECONDS - REVIEW_START ))
+  if [ $CODEX_EXIT -eq 0 ]; then
+    echo "  ✓ Codex: done (${CODEX_ELAPSED}s)"
+  else
+    echo "  ✗ Codex: failed (${CODEX_ELAPSED}s, exit $CODEX_EXIT)"
+    [ -s "$TEMP_DIR/codex_stderr.txt" ] && echo "  $(head -3 "$TEMP_DIR/codex_stderr.txt")"
+  fi
+fi
+
+echo ""
+
+# === Stage 2: Consolidation ===
+CONSOLIDATION_INPUT=""
+if [ "$RUN_CLAUDE" = true ] && [ $CLAUDE_EXIT -eq 0 ] && [ -s "$TEMP_DIR/claude_review.txt" ]; then
+  CONSOLIDATION_INPUT+="=== REVIEW 1 (Claude) ===
+$(cat "$TEMP_DIR/claude_review.txt")
+
+"
+fi
+if [ "$RUN_CODEX" = true ] && [ $CODEX_EXIT -eq 0 ] && [ -s "$TEMP_DIR/codex_review.txt" ]; then
+  CONSOLIDATION_INPUT+="=== REVIEW 2 (Codex) ===
+$(cat "$TEMP_DIR/codex_review.txt")
+
+"
+fi
+
+CONSOLIDATE_EXIT=0
+if [ -n "$CONSOLIDATION_INPUT" ]; then
+  echo "Consolidating findings..."
+  start_spinner "Filtering to critical issues"
+
+  claude -p "Consolidate these code reviews for $REVIEW_LABEL.
+
+$CONSOLIDATION_INPUT
+
+$CONSOLIDATE_SYSTEM_PROMPT" \
+    --max-turns 10 \
+    > "$TEMP_DIR/consolidated.txt" 2>"$TEMP_DIR/consolidate_stderr.txt" || CONSOLIDATE_EXIT=$?
+
+  stop_spinner
+
+  if [ $CONSOLIDATE_EXIT -eq 0 ]; then
+    echo "  ✓ Consolidation: done"
+  else
+    echo "  ✗ Consolidation: failed (exit $CONSOLIDATE_EXIT)"
+  fi
+else
+  echo "Skipping consolidation — no successful reviews to consolidate"
+fi
+
+# Parse verdict from consolidated output
+VERDICT="UNKNOWN"
+if [ -f "$TEMP_DIR/consolidated.txt" ] && [ $CONSOLIDATE_EXIT -eq 0 ]; then
+  VERDICT_LINE=$({ grep -E '^VERDICT: (APPROVE|BLOCK)$' "$TEMP_DIR/consolidated.txt" || true; } | tail -1)
+  if [ -n "$VERDICT_LINE" ]; then
+    VERDICT="${VERDICT_LINE#VERDICT: }"
+  fi
 fi
 
 # === Write Review File ===
-REVIEW_FILE="review_${PR_NUMBER}.md"
-
 {
-  echo "# PR #$PR_NUMBER Review: $PR_TITLE"
+  echo "# Review: $REVIEW_LABEL"
   echo ""
-  echo "- **Author:** $PR_AUTHOR"
-  echo "- **Branch:** $PR_HEAD → $PR_BASE"
-  echo "- **Changes:** +$PR_ADDITIONS / -$PR_DELETIONS"
+  echo "$HEADER_META"
   echo "- **Reviewed:** $(date '+%Y-%m-%d %H:%M')"
   echo ""
 
+  # Consolidated verdict and findings at the top
+  if [ -f "$TEMP_DIR/consolidated.txt" ] && [ $CONSOLIDATE_EXIT -eq 0 ]; then
+    echo "## Verdict: $VERDICT"
+    echo ""
+    grep -v '^VERDICT: ' "$TEMP_DIR/consolidated.txt" || true
+    echo ""
+  else
+    echo "## Verdict: UNKNOWN"
+    echo ""
+    echo "> Consolidation failed — see raw reviews below."
+    echo ""
+  fi
+
+  # Raw reviews in collapsible details blocks
   if [ "$RUN_CLAUDE" = true ]; then
     echo "---"
     echo ""
-    echo "## Claude Code Review"
+    echo "<details>"
+    echo "<summary>Raw Claude Review</summary>"
     echo ""
     if [ $CLAUDE_EXIT -eq 0 ]; then
       cat "$TEMP_DIR/claude_review.txt"
     else
       echo "> **Failed** (exit code: $CLAUDE_EXIT)"
-      echo ""
       cat "$TEMP_DIR/claude_review.txt" 2>/dev/null || echo "(no output)"
     fi
+    echo ""
+    echo "</details>"
     echo ""
   fi
 
   if [ "$RUN_CODEX" = true ]; then
-    echo "---"
-    echo ""
-    echo "## Codex Review"
+    echo "<details>"
+    echo "<summary>Raw Codex Review</summary>"
     echo ""
     if [ $CODEX_EXIT -eq 0 ]; then
       cat "$TEMP_DIR/codex_review.txt"
     else
       echo "> **Failed** (exit code: $CODEX_EXIT)"
-      echo ""
       cat "$TEMP_DIR/codex_review.txt" 2>/dev/null || echo "(no output)"
     fi
+    echo ""
+    echo "</details>"
     echo ""
   fi
 } > "$REVIEW_FILE"
@@ -306,7 +450,7 @@ echo "════════════════════════�
 echo "  Review saved to: $(pwd)/$REVIEW_FILE"
 echo "════════════════════════════════════════════════════════════════"
 
-# Exit with error only if both tools failed
+# Exit with error only if all review tools failed
 if [ "$RUN_CLAUDE" = true ] && [ "$RUN_CODEX" = true ]; then
   if [ $CLAUDE_EXIT -ne 0 ] && [ $CODEX_EXIT -ne 0 ]; then
     echo "Error: Both review tools failed"
