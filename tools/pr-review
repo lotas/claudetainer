@@ -58,10 +58,15 @@ show_progress() {
       fi
     fi
 
-    # Codex status
-    if [ -f "$TEMP_DIR/codex_review.txt" ]; then
+    # Codex status — check stderr for progress since stdout is buffered until completion
+    if [ -f "$TEMP_DIR/codex_review.txt" ] || [ -f "$TEMP_DIR/codex_stderr.txt" ]; then
       local codex_status
+      # Prefer stdout if it has content (means codex is done or flushing)
       codex_status=$(tail -1 "$TEMP_DIR/codex_review.txt" 2>/dev/null | head -c 80)
+      # Fall back to stderr for in-progress output
+      if [ -z "$codex_status" ] && [ -f "$TEMP_DIR/codex_stderr.txt" ]; then
+        codex_status=$(tail -5 "$TEMP_DIR/codex_stderr.txt" 2>/dev/null | grep -v '^$' | tail -1 | head -c 80)
+      fi
       if [ -n "$codex_status" ]; then
         printf "  Codex:  %s\n" "$codex_status" >&2; lines=$((lines+1))
       else
