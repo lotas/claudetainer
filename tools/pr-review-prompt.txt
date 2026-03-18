@@ -9,3 +9,5 @@ Report ALL findings you can identify. Cover:
 - Code quality observations (readability, naming, duplication)
 
 Be thorough. Reference file names and line numbers. Do not skip sections — a separate pass will filter your findings.
+
+IMPORTANT: After you finish exploring the code with tools, write a single final message that contains ALL your findings as a numbered list. Do not split findings across multiple messages — the final message must be self-contained and complete.

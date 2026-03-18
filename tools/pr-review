@@ -252,7 +252,11 @@ CODEX_EXIT=0
 run_claude() {
   claude -p "$CLAUDE_PROMPT" \
     --max-turns 99 \
-    > "$TEMP_DIR/claude_review.txt" 2>"$TEMP_DIR/claude_stderr.txt"
+    --output-format stream-json --verbose \
+    > "$TEMP_DIR/claude_review_stream.jsonl" 2>"$TEMP_DIR/claude_stderr.txt"
+  # Extract all assistant text messages from stream
+  jq -r 'select(.type == "assistant") | .message.content[]? | select(.type == "text") | .text' \
+    "$TEMP_DIR/claude_review_stream.jsonl" > "$TEMP_DIR/claude_review.txt"
 }
 
 run_codex() {
@@ -442,12 +446,20 @@ fi
   fi
 } > "$REVIEW_FILE"
 
+# === Persist Debug Artifacts ===
+DEBUG_DIR="$(dirname "$REVIEW_FILE")/.pr-review-debug"
+mkdir -p "$DEBUG_DIR"
+cp "$TEMP_DIR/claude_review_stream.jsonl" "$DEBUG_DIR/" 2>/dev/null || true
+cp "$TEMP_DIR/codex_review.txt" "$DEBUG_DIR/" 2>/dev/null || true
+cp "$TEMP_DIR/consolidated.txt" "$DEBUG_DIR/" 2>/dev/null || true
+
 # === Present Results ===
 echo ""
 cat "$REVIEW_FILE"
 echo ""
 echo "════════════════════════════════════════════════════════════════"
 echo "  Review saved to: $(pwd)/$REVIEW_FILE"
+echo "  Debug files: $DEBUG_DIR/"
 echo "════════════════════════════════════════════════════════════════"
 
 # Exit with error only if all review tools failed
