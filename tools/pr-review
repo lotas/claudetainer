@@ -12,39 +12,95 @@ RUN_CODEX=true
 ORIGINAL_BRANCH=""
 TEMP_DIR=""
 CHECKOUT_SUCCEEDED=false
-SPINNER_PID=""
+PROGRESS_PID=""
+PROGRESS_LINES=0
 
-# === Spinner ===
-spin() {
-  local label="$1"
+# === Progress Monitor ===
+show_progress() {
   local start=$SECONDS
   local chars='|/-\'
   local i=0
+
   while true; do
     local elapsed=$(( SECONDS - start ))
-    printf "\r  %s %s (%ds)" "${chars:i%${#chars}:1}" "$label" "$elapsed" >&2
-    i=$(( i + 1 ))
+    local spinner="${chars:i%${#chars}:1}"
+
+    # Erase previous block
+    if [ $PROGRESS_LINES -gt 0 ]; then
+      printf "\033[%dA" "$PROGRESS_LINES" >&2
+      for _ in $(seq 1 $PROGRESS_LINES); do
+        printf "\033[K\n" >&2
+      done
+      printf "\033[%dA" "$PROGRESS_LINES" >&2
+    fi
+
+    local lines=0
+    printf "  %s Reviewing (%ds)\n" "$spinner" "$elapsed" >&2; lines=$((lines+1))
+
+    # Claude status
+    if [ -f "$TEMP_DIR/claude_review_stream.jsonl" ]; then
+      local claude_status
+      claude_status=$(tail -20 "$TEMP_DIR/claude_review_stream.jsonl" 2>/dev/null | \
+        jq -r '
+          if .type == "assistant" then
+            .message.content[-1]? |
+            if .type == "tool_use" then "🔧 " + (.name // "tool") + " " + ((.input | tostring)[0:60] // "")
+            elif .type == "text" then "💬 " + (.text | split("\n") | last | .[0:80])
+            else empty
+            end
+          else empty
+          end
+        ' 2>/dev/null | tail -1)
+      if [ -n "$claude_status" ]; then
+        printf "  Claude: %s\n" "$claude_status" >&2; lines=$((lines+1))
+      else
+        printf "  Claude: waiting...\n" >&2; lines=$((lines+1))
+      fi
+    fi
+
+    # Codex status
+    if [ -f "$TEMP_DIR/codex_review.txt" ]; then
+      local codex_status
+      codex_status=$(tail -1 "$TEMP_DIR/codex_review.txt" 2>/dev/null | head -c 80)
+      if [ -n "$codex_status" ]; then
+        printf "  Codex:  %s\n" "$codex_status" >&2; lines=$((lines+1))
+      else
+        printf "  Codex:  waiting...\n" >&2; lines=$((lines+1))
+      fi
+    fi
+
+    PROGRESS_LINES=$lines
+    i=$((i+1))
     sleep 1
   done
 }
 
-start_spinner() {
-  spin "$1" &
-  SPINNER_PID=$!
+start_progress() {
+  PROGRESS_LINES=0
+  show_progress &
+  PROGRESS_PID=$!
 }
 
-stop_spinner() {
-  if [ -n "$SPINNER_PID" ] && kill -0 "$SPINNER_PID" 2>/dev/null; then
-    kill "$SPINNER_PID" 2>/dev/null
-    wait "$SPINNER_PID" 2>/dev/null || true
-    printf "\r\033[K" >&2
-    SPINNER_PID=""
+stop_progress() {
+  if [ -n "$PROGRESS_PID" ] && kill -0 "$PROGRESS_PID" 2>/dev/null; then
+    kill "$PROGRESS_PID" 2>/dev/null
+    wait "$PROGRESS_PID" 2>/dev/null || true
+    # Erase the progress block
+    if [ $PROGRESS_LINES -gt 0 ]; then
+      printf "\033[%dA" "$PROGRESS_LINES" >&2
+      for _ in $(seq 1 $PROGRESS_LINES); do
+        printf "\033[K\n" >&2
+      done
+      printf "\033[%dA" "$PROGRESS_LINES" >&2
+    fi
+    PROGRESS_PID=""
+    PROGRESS_LINES=0
   fi
 }
 
 # === Cleanup ===
 cleanup() {
-  stop_spinner
+  stop_progress
 
   # Restore original branch if we checked out a PR
   if [ "$CHECKOUT_SUCCEEDED" = true ] && [ -n "$ORIGINAL_BRANCH" ]; then
@@ -289,7 +345,7 @@ if [ "$RUN_CLAUDE" = true ] && [ "$RUN_CODEX" = true ]; then
   (run_with_retry run_codex "Codex" "$TEMP_DIR/codex_review.txt") &
   CODEX_PID=$!
 
-  start_spinner "Waiting for reviews"
+  start_progress
 
   wait $CLAUDE_PID 2>/dev/null || CLAUDE_EXIT=$?
   CLAUDE_ELAPSED=$(( SECONDS - REVIEW_START ))
@@ -297,7 +353,7 @@ if [ "$RUN_CLAUDE" = true ] && [ "$RUN_CODEX" = true ]; then
   wait $CODEX_PID 2>/dev/null || CODEX_EXIT=$?
   CODEX_ELAPSED=$(( SECONDS - REVIEW_START ))
 
-  stop_spinner
+  stop_progress
 
   if [ $CLAUDE_EXIT -eq 0 ]; then
     echo "  ✓ Claude: done (${CLAUDE_ELAPSED}s)"
@@ -315,9 +371,9 @@ if [ "$RUN_CLAUDE" = true ] && [ "$RUN_CODEX" = true ]; then
 elif [ "$RUN_CLAUDE" = true ]; then
   echo "Running Claude review..."
   REVIEW_START=$SECONDS
-  start_spinner "Claude reviewing"
+  start_progress
   run_with_retry run_claude "Claude" "$TEMP_DIR/claude_review.txt" || CLAUDE_EXIT=$?
-  stop_spinner
+  stop_progress
   CLAUDE_ELAPSED=$(( SECONDS - REVIEW_START ))
   if [ $CLAUDE_EXIT -eq 0 ]; then
     echo "  ✓ Claude: done (${CLAUDE_ELAPSED}s)"
@@ -329,9 +385,9 @@ elif [ "$RUN_CLAUDE" = true ]; then
 elif [ "$RUN_CODEX" = true ]; then
   echo "Running Codex review..."
   REVIEW_START=$SECONDS
-  start_spinner "Codex reviewing"
+  start_progress
   run_with_retry run_codex "Codex" "$TEMP_DIR/codex_review.txt" || CODEX_EXIT=$?
-  stop_spinner
+  stop_progress
   CODEX_ELAPSED=$(( SECONDS - REVIEW_START ))
   if [ $CODEX_EXIT -eq 0 ]; then
     echo "  ✓ Codex: done (${CODEX_ELAPSED}s)"
@@ -361,7 +417,7 @@ fi
 CONSOLIDATE_EXIT=0
 if [ -n "$CONSOLIDATION_INPUT" ]; then
   echo "Consolidating findings..."
-  start_spinner "Filtering to critical issues"
+  start_progress
 
   claude -p "Consolidate these code reviews for $REVIEW_LABEL.
 
@@ -371,7 +427,7 @@ $CONSOLIDATE_SYSTEM_PROMPT" \
     --max-turns 10 \
     > "$TEMP_DIR/consolidated.txt" 2>"$TEMP_DIR/consolidate_stderr.txt" || CONSOLIDATE_EXIT=$?
 
-  stop_spinner
+  stop_progress
 
   if [ $CONSOLIDATE_EXIT -eq 0 ]; then
     echo "  ✓ Consolidation: done"
