@@ -452,6 +452,27 @@ mkdir -p "$DEBUG_DIR"
 cp "$TEMP_DIR/claude_review_stream.jsonl" "$DEBUG_DIR/" 2>/dev/null || true
 cp "$TEMP_DIR/codex_review.txt" "$DEBUG_DIR/" 2>/dev/null || true
 cp "$TEMP_DIR/consolidated.txt" "$DEBUG_DIR/" 2>/dev/null || true
+# Generate human-readable transcript of the full Claude conversation
+if [ -s "$TEMP_DIR/claude_review_stream.jsonl" ]; then
+  jq -r '
+    if .type == "user" then
+      "\n══ USER ══\n" + (.message.content // [] | map(
+        if .type == "text" then .text
+        elif .type == "tool_result" then "[tool_result: \(.tool_use_id // "?")]"
+        else "[" + (.type // "unknown") + "]"
+        end
+      ) | join("\n"))
+    elif .type == "assistant" then
+      "\n══ ASSISTANT ══\n" + (.message.content // [] | map(
+        if .type == "text" then .text
+        elif .type == "tool_use" then "[tool: \(.name // "?")](\(.input | tostring | .[0:200]))"
+        else "[" + (.type // "unknown") + "]"
+        end
+      ) | join("\n"))
+    else empty
+    end
+  ' "$TEMP_DIR/claude_review_stream.jsonl" > "$DEBUG_DIR/claude_conversation.txt" 2>/dev/null || true
+fi
 
 # === Present Results ===
 echo ""
