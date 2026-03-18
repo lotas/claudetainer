@@ -282,10 +282,8 @@ sanitize_volume_name() {
 }
 
 detect_auto_volumes() {
-  local patterns=("-name" "node_modules" "-o" "-name" ".venv")
-
-  # Find matching directories, output paths relative to PROJECT_DIR
-  find "$PROJECT_DIR" -maxdepth 3 -type d \( "${patterns[@]}" \) -not -path '*/.*/*' 2>/dev/null | while IFS= read -r dir; do
+  # Find matching directories, prune to avoid nested matches (e.g., node_modules/x/node_modules)
+  find "$PROJECT_DIR" -maxdepth 3 -type d \( -name "node_modules" -o -name ".venv" \) -not -path '*/.*/*' -prune 2>/dev/null | while IFS= read -r dir; do
     local relative="${dir#$PROJECT_DIR/}"
     echo "$relative"
   done
